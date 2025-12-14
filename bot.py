@@ -16,7 +16,7 @@ logging.basicConfig(
 WAITING_USERNAME, WAITING_PASSWORD = range(2)
 
 BOT_TOKEN = "8329574176:AAHVRhNgGjT5Z1ckbivE5r8e2H02e5TO6NA"
-SHEETS_API_URL = "https://script.google.com/macros/s/AKfycbylZn2se9Ac5JaL1Xa7zWzR63nSa8tzMwNYayskNIrM0LvW6g7zvsVtkxAxHBQaWaRF/exec"
+SHEETS_API_URL = "https://script.google.com/macros/s/AKfycbxkl9Hf36Pb4NiYcZZuP-ifvicfQyUS0uTkJaIqL8tEfH0dchg-GprZlVZ3vdX1cU0/exec"
 AUTH_TOKEN = "Rmodi182"
 ALERT_FILE = "alerts.json"
 
