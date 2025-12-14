@@ -174,7 +174,7 @@ async def receive_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text("💾 Saving credentials to secure storage...")
     
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(follow_redirects=True) as client:
         try:
             payload = {
                 "action": "register",
@@ -249,7 +249,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def trigger_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
     # Using httpx to hit GAS
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(follow_redirects=True) as client:
         try:
             # Set scrape command
             payload = {
@@ -444,7 +444,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = update.message.text
         await update.message.reply_text(f"📤 Sending '{text}' to worker...")
         
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(follow_redirects=True) as client:
             try:
                 # Set captcha
                 payload = {
