@@ -21,8 +21,7 @@ BOT_TOKEN = "8329574176:AAHVRhNgGjT5Z1ckbivE5r8e2H02e5TO6NA"
 SHEETS_API_URL = "https://script.google.com/macros/s/AKfycbyrXm2wWTwWkgCZdnLvvEW8rLluiS4JIB2NWJjpHr6-V2x9UCxj-I4tz6Buld4VaxMe/exec"
 AUTH_TOKEN = "Rmodi182"
 ALERT_FILE = "alerts.json"
-ALERT_FILE = "alerts.json"
-CONTROL_GROUP_ID = os.getenv("CONTROL_GROUP_ID") # Set this in Railway variables
+WORKER_BOT_ID = os.getenv("WORKER_BOT_ID") # Worker Bot's chat ID
 
 
 
@@ -205,33 +204,26 @@ async def cancel_login(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❌ Login cancelled.")
     return ConversationHandler.END
 
-# ---------- CONTROL GROUP LISTENER ----------
+# ---------- WORKER BOT LISTENER ----------
 
-async def listen_to_control_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def listen_to_worker_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Listens to messages in the Control Group from the Worker.
+    Listens to messages from the Worker Bot.
     Format expected:
     - CAPTCHA_REQ <chat_id> (with photo)
     - SUCCESS <chat_id>
     - FAIL <chat_id> <reason>
     """
-    msg = update.message or update.channel_post
+    msg = update.message
     if not msg: return
     
-    # Check if message is from the Worker (Userbot) or just valid text
-    # We can check msg.from_user.id if we know the worker's ID, but protocol keywords are enough?
-    # Text message analysis
     text = msg.caption or msg.text or ""
     
     if "CAPTCHA_REQ" in text:
-        # Expected: CAPTCHA_REQ <chat_id>
         parts = text.split()
         if len(parts) >= 2:
             chat_id = parts[1]
             if msg.photo:
-                # Forward the photo to the user
-                # We need to download and resend, or just copy_message?
-                # copy_message is easiest
                 try:
                     await context.bot.copy_message(
                         chat_id=chat_id,
@@ -244,11 +236,9 @@ async def listen_to_control_group(update: Update, context: ContextTypes.DEFAULT_
                     logging.error(f"Failed to forward captcha to {chat_id}: {e}")
                     
     elif "SUCCESS" in text:
-        # Expected: SUCCESS <chat_id>
         parts = text.split()
         if len(parts) >= 2:
             chat_id = parts[1]
-            # Trigger summary
             try:
                 await context.bot.send_message(chat_id=chat_id, text="✅ Update Data Complete! Fetching summary...")
                 summary_text = await get_summary_text(chat_id)
@@ -319,17 +309,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def trigger_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
     
-    # Send Signal to Control Group
-    if not CONTROL_GROUP_ID:
-        await update.message.reply_text("❌ Configuration Error: CONTROL_GROUP_ID not set.")
+    # Send Signal to Worker Bot
+    if not WORKER_BOT_ID:
+        await update.message.reply_text("❌ Configuration Error: WORKER_BOT_ID not set.")
         return
 
     try:
-        # Format: REQ_SCRAPE <chat_id>
         msg_text = f"REQ_SCRAPE {chat_id}"
-        # Ensure it's an int for group IDs
-        target_group_id = int(CONTROL_GROUP_ID)
-        await context.bot.send_message(chat_id=target_group_id, text=msg_text)
+        worker_bot_id = int(WORKER_BOT_ID)
+        await context.bot.send_message(chat_id=worker_bot_id, text=msg_text)
         
         status_msg = "📡 *Signal Sent to Worker via Telegram*\nWait for CAPTCHA..."
         
@@ -338,7 +326,6 @@ async def trigger_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text(status_msg, parse_mode="Markdown")
             
-        # Mark as waiting
         context.application.bot_data.setdefault('waiting_captcha_chats', set()).add(chat_id)
         
     except Exception as e:
@@ -522,12 +509,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
              return
 
         try:
-            # Format: CAPTCHA_SOL <chat_id> <text>
             cmd = f"CAPTCHA_SOL {chat_id} {text}"
-            target_group_id = int(CONTROL_GROUP_ID)
-            await context.bot.send_message(chat_id=target_group_id, text=cmd)
+            worker_bot_id = int(WORKER_BOT_ID)
+            await context.bot.send_message(chat_id=worker_bot_id, text=cmd)
         except Exception as e:
-            await update.message.reply_text(f"Error forwarding to Control Group: {e}")
+            await update.message.reply_text(f"Error forwarding to Worker Bot: {e}")
     else:
         # Default behavior for unknown text
         await update.message.reply_text("I didn't understand that. Use /start for menu.")
@@ -575,26 +561,18 @@ def main():
     )
     scheduler.start()
 
-    print("🤖 Attendance Bot V2 (Async + Telegram IPC) running...")
+    print("🤖 Attendance Bot V2 (Async + Bot-to-Bot) running...")
     
-    # Register Control Group Listener
-    # We use MessageHandler with a filter for the Group ID if possible, or just all updates?
-    # Better to filter by Chat ID if we had it hardcoded, but it's dynamic env var.
-    # We'll use a filter that checks if the update is from the Control Group.
-    # Note: filters.Chat(id) requires int.
-    
-    # Because CONTROL_GROUP_ID is loaded at runtime, we can create the filter then.
-    if CONTROL_GROUP_ID:
+    # Register Worker Bot Listener
+    if WORKER_BOT_ID:
         try:
-            # Add handler for Control Group Messages
-            # We catch specific keywords or all text in that group
-            target_group = int(CONTROL_GROUP_ID)
-            app.add_handler(MessageHandler(filters.Chat(chat_id=target_group), listen_to_control_group))
-            print(f"✅ Listening to Control Group: {target_group}")
+            worker_id = int(WORKER_BOT_ID)
+            app.add_handler(MessageHandler(filters.Chat(chat_id=worker_id), listen_to_worker_bot))
+            print(f"✅ Listening to Worker Bot: {worker_id}")
         except ValueError:
-            print("⚠️ CONTROL_GROUP_ID must be an integer (e.g. -10045...).")
+            print("⚠️ WORKER_BOT_ID must be an integer.")
     else:
-        print("⚠️ CONTROL_GROUP_ID not set. IPC will fail.")
+        print("⚠️ WORKER_BOT_ID not set. Bot-to-bot communication will fail.")
 
     app.run_polling()
 
