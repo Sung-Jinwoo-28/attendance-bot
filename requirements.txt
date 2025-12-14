@@ -2,3 +2,4 @@ python-telegram-bot
 httpx
 apscheduler
 tzlocal
+redis

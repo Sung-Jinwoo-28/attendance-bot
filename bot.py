@@ -5,6 +5,9 @@ import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler, MessageHandler, filters, ConversationHandler
 from apscheduler.schedulers.background import BackgroundScheduler
+import redis.asyncio as redis
+import base64
+import io
 
 # Enable logging
 logging.basicConfig(
@@ -19,6 +22,8 @@ BOT_TOKEN = "8329574176:AAHVRhNgGjT5Z1ckbivE5r8e2H02e5TO6NA"
 SHEETS_API_URL = "https://script.google.com/macros/s/AKfycbyrXm2wWTwWkgCZdnLvvEW8rLluiS4JIB2NWJjpHr6-V2x9UCxj-I4tz6Buld4VaxMe/exec"
 AUTH_TOKEN = "Rmodi182"
 ALERT_FILE = "alerts.json"
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379") # Default to local for testing
+
 
 
 # ---------- HELPERS ----------
@@ -199,6 +204,72 @@ async def cancel_login(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❌ Login cancelled.")
     return ConversationHandler.END
 
+
+# ---------- REDIS LISTENER ----------
+
+async def listen_to_redis(app):
+    """
+    Background task to listen for messages from the worker (Captcha, Status, Done).
+    """
+    logging.info(f"🔌 Connecting to Redis at {REDIS_URL}...")
+    try:
+        r = redis.from_url(REDIS_URL, decode_responses=True)
+        pubsub = r.pubsub()
+        await pubsub.subscribe("attendance_replies")
+        logging.info("✅ Subscribed to 'attendance_replies'")
+
+        async for message in pubsub.listen():
+            if message['type'] == 'message':
+                try:
+                    data = json.loads(message['data'])
+                    chat_id = data.get('chat_id')
+                    msg_type = data.get('type')
+                    
+                    if not chat_id: continue
+                    
+                    if msg_type == 'captcha':
+                        # Decode and send image
+                        img_str = data.get('image')
+                        caption = data.get('caption', "Please enter CAPTCHA:")
+                        
+                        img_bytes = base64.b64decode(img_str)
+                        await app.bot.send_photo(
+                            chat_id=chat_id, 
+                            photo=img_bytes, 
+                            caption=caption
+                        )
+                        # Set waiting flag (though context is hard to get here, 
+                        # we rely on user flow or stateless handling in handle_text)
+                        # For handle_text to work, we can set a flag in Redis or just assume user replies.
+                        # Simple: Bot assumes any text after a captcha request is the captcha.
+                        # But handle_text relies on context.user_data.
+                        # We can't easily access context.user_data here without 'context'.
+                        # Workaround: Maintain a simple in-memory global dict or Redis 'waiting_for_captcha' set.
+                        # For now, let's just send the image. The user will reply. 
+                        # handle_text needs to know.
+                        # We will use a makeshift global set for this run.
+                        app.bot_data.setdefault('waiting_captcha_chats', set()).add(str(chat_id))
+                        
+                    elif msg_type == 'message':
+                        text = data.get('text')
+                        await app.bot.send_message(chat_id=chat_id, text=text)
+                        
+                    elif msg_type == 'done':
+                        # Worker finished writing to Sheets.
+                        await app.bot.send_message(chat_id=chat_id, text="✅ Update Data Complete! Fetching summary...")
+                        # Now trigger summary
+                        text = await get_summary_text(chat_id)
+                        await app.bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
+                        
+                        # Clear waiting flag
+                        if 'waiting_captcha_chats' in app.bot_data:
+                            app.bot_data['waiting_captcha_chats'].discard(str(chat_id))
+
+                except Exception as e:
+                    logging.error(f"Error processing Redis message: {e}")
+                    
+    except Exception as e:
+        logging.error(f"Redis Listener Error: {e}")
 # ---------- LOGIC HELPERS ----------
 
 async def get_summary_text(chat_id):
@@ -248,35 +319,31 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def trigger_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
-    # Using httpx to hit GAS
-    async with httpx.AsyncClient(follow_redirects=True) as client:
-        try:
-            # Set scrape command
-            payload = {
-                "action": "set_command", 
-                "command": "scrape", 
-                "chat_id": chat_id,
-                "auth_token": AUTH_TOKEN
-            }
-            r = await client.post(SHEETS_API_URL, json=payload)
+    
+    # Send Signal to Redis
+    try:
+        r = redis.from_url(REDIS_URL, decode_responses=True)
+        message = {
+            "command": "scrape",
+            "chat_id": chat_id
+        }
+        await r.publish("attendance_commands", json.dumps(message))
+        
+        msg = "📡 *Signal Sent to Local Worker via Redis*\nWait for CAPTCHA..."
+        
+        if update.callback_query:
+            await update.callback_query.edit_message_text(msg, parse_mode="Markdown")
+        else:
+            await update.message.reply_text(msg, parse_mode="Markdown")
             
-            # Send message
-            msg = "📡 *Signal Sent to Home Base*\nwaiting for local worker to pick up..."
-            
-            # If called from button
-            if update.callback_query:
-                await update.callback_query.edit_message_text(msg, parse_mode="Markdown")
-                # Set a context user_data flag that we might be waiting for captcha
-                context.user_data['waiting_captcha'] = True
-            else:
-                await update.message.reply_text(msg, parse_mode="Markdown")
-                context.user_data['waiting_captcha'] = True
-                
-        except Exception as e:
-            if update.callback_query:
-                await update.callback_query.edit_message_text(f"Error triggering update: {e}")
-            else:
-                await update.message.reply_text(f"Error triggering update: {e}")
+        # Mark as waiting
+        context.application.bot_data.setdefault('waiting_captcha_chats', set()).add(chat_id)
+        
+    except Exception as e:
+         if update.callback_query:
+             await update.callback_query.edit_message_text(f"Error triggering Redis: {e}")
+         else:
+             await update.message.reply_text(f"Error triggering Redis: {e}")
 
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -440,22 +507,27 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # OR we just always forward text to 'set_captcha' if it looks like a captcha (4-6 chars).
     # Being explicit is better.
     
-    if context.user_data.get('waiting_captcha'):
+    chat_id = str(update.effective_chat.id)
+    waiting_chats = context.application.bot_data.get('waiting_captcha_chats', set())
+    
+    if chat_id in waiting_chats:
         text = update.message.text
-        await update.message.reply_text(f"📤 Sending '{text}' to worker...")
+        await update.message.reply_text(f"📤 Forwarding to worker via Redis...")
         
-        async with httpx.AsyncClient(follow_redirects=True) as client:
-            try:
-                # Set captcha
-                payload = {
-                    "action": "set_captcha", 
-                    "text": text,
-                    "auth_token": AUTH_TOKEN
-                }
-                await client.post(SHEETS_API_URL, json=payload)
-                context.user_data['waiting_captcha'] = False # Reset
-            except Exception as e:
-                await update.message.reply_text(f"Error forwarding captcha: {e}")
+        try:
+            r = redis.from_url(REDIS_URL, decode_responses=True)
+            message = {
+                "command": "captcha_response",
+                "chat_id": chat_id,
+                "captcha_text": text
+            }
+            await r.publish("attendance_commands", json.dumps(message))
+            
+            # Don't remove from set yet, wait for 'done' or another captcha
+            # But typically we can assume one captcha per session
+            # waiting_chats.discard(chat_id) 
+        except Exception as e:
+            await update.message.reply_text(f"Error publishing to Redis: {e}")
     else:
         # Default behavior for unknown text
         await update.message.reply_text("I didn't understand that. Use /start for menu.")
@@ -503,7 +575,11 @@ def main():
     )
     scheduler.start()
 
-    print("🤖 Attendance Bot V2 (Async + Daily) running...")
+    print("🤖 Attendance Bot V2 (Async + Redis) running...")
+    
+    # Start Redis Listener
+    app.create_task(listen_to_redis(app))
+    
     app.run_polling()
 
 
