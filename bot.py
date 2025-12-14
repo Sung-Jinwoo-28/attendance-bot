@@ -327,7 +327,9 @@ async def trigger_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         # Format: REQ_SCRAPE <chat_id>
         msg_text = f"REQ_SCRAPE {chat_id}"
-        await context.bot.send_message(chat_id=CONTROL_GROUP_ID, text=msg_text)
+        # Ensure it's an int for group IDs
+        target_group_id = int(CONTROL_GROUP_ID)
+        await context.bot.send_message(chat_id=target_group_id, text=msg_text)
         
         status_msg = "📡 *Signal Sent to Worker via Telegram*\nWait for CAPTCHA..."
         
@@ -522,7 +524,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             # Format: CAPTCHA_SOL <chat_id> <text>
             cmd = f"CAPTCHA_SOL {chat_id} {text}"
-            await context.bot.send_message(chat_id=CONTROL_GROUP_ID, text=cmd)
+            target_group_id = int(CONTROL_GROUP_ID)
+            await context.bot.send_message(chat_id=target_group_id, text=cmd)
         except Exception as e:
             await update.message.reply_text(f"Error forwarding to Control Group: {e}")
     else:
