@@ -20,7 +20,6 @@ WAITING_USERNAME, WAITING_PASSWORD = range(2)
 BOT_TOKEN = "8329574176:AAHVRhNgGjT5Z1ckbivE5r8e2H02e5TO6NA"
 SHEETS_API_URL = "https://script.google.com/macros/s/AKfycbyrXm2wWTwWkgCZdnLvvEW8rLluiS4JIB2NWJjpHr6-V2x9UCxj-I4tz6Buld4VaxMe/exec"
 AUTH_TOKEN = "Rmodi182"
-ALERT_FILE = "alerts.json"
 COMMUNICATION_GROUP_ID = os.getenv("COMMUNICATION_GROUP_ID") # Group where both bots communicate
 
 
@@ -504,8 +503,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = update.message.text
         await update.message.reply_text(f"📤 Forwarding response to worker...")
         
-        if not CONTROL_GROUP_ID:
-             await update.message.reply_text("❌ Error: CONTROL_GROUP_ID missing.")
+        if not COMMUNICATION_GROUP_ID:
+             await update.message.reply_text("❌ Error: COMMUNICATION_GROUP_ID missing.")
              return
 
         try:
