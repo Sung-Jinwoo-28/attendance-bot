@@ -3,7 +3,7 @@ import json
 import os
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler, MessageHandler, filters, ConversationHandler
 from apscheduler.schedulers.background import BackgroundScheduler
 
 # Enable logging
@@ -12,18 +12,29 @@ logging.basicConfig(
     level=logging.INFO
 )
 
+# Login Conversation States
+WAITING_USERNAME, WAITING_PASSWORD = range(2)
+
 BOT_TOKEN = "8329574176:AAHVRhNgGjT5Z1ckbivE5r8e2H02e5TO6NA"
-SHEETS_API_URL = "https://script.google.com/macros/s/AKfycbzLNfd_hoiFaEeEsQr2q5UBc1XXJ-iAAAu6PJA3JiwRwShjkxWDQ8Hda0SilDaUuYIN/exec"
+SHEETS_API_URL = "https://script.google.com/macros/s/AKfycbyMJZkrIrOQqW1Z-BkWkQbxr5uZgNEgmB3zIZ01CvY/exec"
+AUTH_TOKEN = "Rmodi182"
 ALERT_FILE = "alerts.json"
 
 
 # ---------- HELPERS ----------
 
-async def fetch_data():
+async def fetch_data(chat_id=None):
+    url = SHEETS_API_URL
+    if chat_id:
+        url += f"?chat_id={chat_id}"
+        
     async with httpx.AsyncClient(follow_redirects=True) as client:
-        r = await client.get(SHEETS_API_URL, timeout=20.0)
-        r.raise_for_status()
-        return r.json()
+        r = await client.get(url, timeout=20.0)
+        # GAS returns empty or error JSON sometimes
+        try:
+            return r.json()
+        except:
+             return []
 
 def pct(p):
     return f"{p*100:.1f}%"
@@ -142,39 +153,91 @@ async def send_daily_summary(app, target_chat_id=None):
                     logging.error(f"Failed to send to {chat_id}: {e}")
 
 
+# ---------- LOGIN HANDLERS ----------
+
+async def login_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🔐 *Register / Login*\n\nPlease enter your *Register Number* (KP Username):",
+        parse_mode="Markdown"
+    )
+    return WAITING_USERNAME
+
+async def receive_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['register_username'] = update.message.text.strip()
+    await update.message.reply_text("🔑 Now enter your *Password*:")
+    return WAITING_PASSWORD
+
+async def receive_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    username = context.user_data.get('register_username')
+    password = update.message.text.strip()
+    chat_id = str(update.effective_chat.id)
+    
+    await update.message.reply_text("💾 Saving credentials to secure storage...")
+    
+    async with httpx.AsyncClient() as client:
+        try:
+            payload = {
+                "action": "register",
+                "chat_id": chat_id,
+                "username": username,
+                "password": password,
+                "auth_token": AUTH_TOKEN
+            }
+            r = await client.post(SHEETS_API_URL, json=payload)
+            data = r.json()
+            
+            if data.get("status") == "registered":
+                await update.message.reply_text("✅ *Registration Successful!*\nYour sheets have been created. You can now use /update.", parse_mode="Markdown")
+            else:
+                await update.message.reply_text(f"❌ Error: {data.get('message')}")
+        except Exception as e:
+             await update.message.reply_text(f"❌ Connection Error: {e}")
+
+    return ConversationHandler.END
+
+async def cancel_login(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("❌ Login cancelled.")
+    return ConversationHandler.END
+
 # ---------- LOGIC HELPERS ----------
 
-async def get_summary_text():
+async def get_summary_text(chat_id):
     try:
-        rows = await fetch_data()
+        rows = await fetch_data(chat_id)
+        if not rows: return "⚠️ No data found. Please /login first then /update."
     except Exception as e:
         return f"⚠️ Error fetching data: {e}"
 
     msg = "📊 *Attendance Summary*\n\n"
     for r in rows:
-        msg += f"{r[0]} ({r[1]}): {r[4]*100:.1f}%\n"
+        # Assuming R[0]=Subject, R[1]=Type, R[4]=Pct (decimal)
+        # Check if row has enough cols
+        if len(r) > 4:
+            msg += f"{r[0]} ({r[1]}): {float(r[4])*100:.1f}%\n"
     return msg
 
-async def get_below85_text():
+async def get_below85_text(chat_id):
     try:
-        rows = await fetch_data()
+        rows = await fetch_data(chat_id)
+        if not rows: return "⚠️ No data found. Please /login first then /update."
     except Exception as e:
         return f"⚠️ Error fetching data: {e}"
 
-    bad = [r for r in rows if r[4] < 0.85]
+    bad = [r for r in rows if len(r)>4 and float(r[4]) < 0.85]
     if not bad:
         return "✅ All subjects above 85%"
 
     msg = "⚠️ *Below 85%*\n\n"
     for r in bad:
-        msg += f"{r[0]} ({r[1]}): {r[4]*100:.1f}%\n"
+        msg += f"{r[0]} ({r[1]}): {float(r[4])*100:.1f}%\n"
     return msg
 
 # ---------- HANDLERS ----------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
-        [InlineKeyboardButton("Menu", callback_data="main_menu")]
+        [InlineKeyboardButton("Menu", callback_data="main_menu")],
+        [InlineKeyboardButton("🔄 Update Attendance", callback_data="cmd_update")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
@@ -182,6 +245,39 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=reply_markup,
         parse_mode="Markdown"
     )
+
+async def trigger_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = str(update.effective_chat.id)
+    # Using httpx to hit GAS
+    async with httpx.AsyncClient() as client:
+        try:
+            # Set scrape command
+            payload = {
+                "action": "set_command", 
+                "command": "scrape", 
+                "chat_id": chat_id,
+                "auth_token": AUTH_TOKEN
+            }
+            r = await client.post(SHEETS_API_URL, json=payload)
+            
+            # Send message
+            msg = "📡 *Signal Sent to Home Base*\nwaiting for local worker to pick up..."
+            
+            # If called from button
+            if update.callback_query:
+                await update.callback_query.edit_message_text(msg, parse_mode="Markdown")
+                # Set a context user_data flag that we might be waiting for captcha
+                context.user_data['waiting_captcha'] = True
+            else:
+                await update.message.reply_text(msg, parse_mode="Markdown")
+                context.user_data['waiting_captcha'] = True
+                
+        except Exception as e:
+            if update.callback_query:
+                await update.callback_query.edit_message_text(f"Error triggering update: {e}")
+            else:
+                await update.message.reply_text(f"Error triggering update: {e}")
+
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -202,12 +298,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
 
+    elif query.data == "cmd_update":
+        await trigger_update(update, context)
+
     elif query.data == "cmd_summary":
-        text = await get_summary_text()
+        chat_id = str(update.effective_chat.id)
+        text = await get_summary_text(chat_id)
         await query.edit_message_text(text, parse_mode="Markdown")
 
     elif query.data == "cmd_below85":
-        text = await get_below85_text()
+        chat_id = str(update.effective_chat.id)
+        text = await get_below85_text(chat_id)
         await query.edit_message_text(text, parse_mode="Markdown")
 
     elif query.data == "help_attendance":
@@ -226,11 +327,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = await get_summary_text()
+    text = await get_summary_text(str(update.effective_chat.id))
     await update.message.reply_text(text, parse_mode="Markdown")
 
 async def below85(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = await get_below85_text()
+    text = await get_below85_text(str(update.effective_chat.id))
     await update.message.reply_text(text, parse_mode="Markdown")
 
 async def attendance(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -239,10 +340,14 @@ async def attendance(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        rows = await fetch_data()
+        rows = await fetch_data(str(update.effective_chat.id))
     except Exception as e:
         await update.message.reply_text(f"⚠️ Error fetching data: {e}")
         return
+    
+    if not rows:
+         await update.message.reply_text("⚠️ No data found. Please /login first.")
+         return
 
     query = " ".join(context.args)
     matches = match_subject(query, rows)
@@ -268,10 +373,14 @@ async def bunk(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        rows = await fetch_data()
+        rows = await fetch_data(str(update.effective_chat.id))
     except Exception as e:
         await update.message.reply_text(f"⚠️ Error fetching data: {e}")
         return
+    
+    if not rows:
+         await update.message.reply_text("⚠️ No data found. Please /login first.")
+         return
 
     query = " ".join(context.args)
     matches = match_subject(query, rows)
@@ -325,19 +434,63 @@ async def test_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_daily_summary(context.application, target_chat_id=update.effective_chat.id)
 
 
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Check if we are waiting for something?
+    # Actually, simplistic approach: if user initiates update, we assume next text might be captcha.
+    # OR we just always forward text to 'set_captcha' if it looks like a captcha (4-6 chars).
+    # Being explicit is better.
+    
+    if context.user_data.get('waiting_captcha'):
+        text = update.message.text
+        await update.message.reply_text(f"📤 Sending '{text}' to worker...")
+        
+        async with httpx.AsyncClient() as client:
+            try:
+                # Set captcha
+                payload = {
+                    "action": "set_captcha", 
+                    "text": text,
+                    "auth_token": AUTH_TOKEN
+                }
+                await client.post(SHEETS_API_URL, json=payload)
+                context.user_data['waiting_captcha'] = False # Reset
+            except Exception as e:
+                await update.message.reply_text(f"Error forwarding captcha: {e}")
+    else:
+        # Default behavior for unknown text
+        await update.message.reply_text("I didn't understand that. Use /start for menu.")
+
+
 # ---------- MAIN ----------
 
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
+    
+    # Login Conversation
+    login_conv = ConversationHandler(
+        entry_points=[CommandHandler('login', login_start)],
+        states={
+            WAITING_USERNAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_username)],
+            WAITING_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_password)]
+        },
+        fallbacks=[CommandHandler('cancel', cancel_login)]
+    )
+    app.add_handler(login_conv)
+    
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(CommandHandler("summary", summary))
     app.add_handler(CommandHandler("below85", below85))
     app.add_handler(CommandHandler("attendance", attendance))
     app.add_handler(CommandHandler("bunk", bunk))
     app.add_handler(CommandHandler("alerts", alerts_cmd))
+    app.add_handler(CommandHandler("alerts", alerts_cmd))
     app.add_handler(CommandHandler("testdaily", test_daily))
+    app.add_handler(CommandHandler("update", trigger_update))
+    
+    # Generic Message Handler for Captcha
+    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_text))
 
     # DAILY scheduler (9:00 AM)
     scheduler = BackgroundScheduler()
