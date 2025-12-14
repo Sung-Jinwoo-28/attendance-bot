@@ -21,7 +21,7 @@ BOT_TOKEN = "8329574176:AAHVRhNgGjT5Z1ckbivE5r8e2H02e5TO6NA"
 SHEETS_API_URL = "https://script.google.com/macros/s/AKfycbyrXm2wWTwWkgCZdnLvvEW8rLluiS4JIB2NWJjpHr6-V2x9UCxj-I4tz6Buld4VaxMe/exec"
 AUTH_TOKEN = "Rmodi182"
 ALERT_FILE = "alerts.json"
-WORKER_BOT_ID = os.getenv("WORKER_BOT_ID") # Worker Bot's chat ID
+COMMUNICATION_GROUP_ID = os.getenv("COMMUNICATION_GROUP_ID") # Group where both bots communicate
 
 
 
@@ -309,15 +309,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def trigger_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
     
-    # Send Signal to Worker Bot
-    if not WORKER_BOT_ID:
-        await update.message.reply_text("❌ Configuration Error: WORKER_BOT_ID not set.")
+    # Send Signal to Communication Group
+    if not COMMUNICATION_GROUP_ID:
+        await update.message.reply_text("❌ Configuration Error: COMMUNICATION_GROUP_ID not set.")
         return
 
     try:
         msg_text = f"REQ_SCRAPE {chat_id}"
-        worker_bot_id = int(WORKER_BOT_ID)
-        await context.bot.send_message(chat_id=worker_bot_id, text=msg_text)
+        group_id = int(COMMUNICATION_GROUP_ID)
+        await context.bot.send_message(chat_id=group_id, text=msg_text)
         
         status_msg = "📡 *Signal Sent to Worker via Telegram*\nWait for CAPTCHA..."
         
@@ -510,10 +510,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         try:
             cmd = f"CAPTCHA_SOL {chat_id} {text}"
-            worker_bot_id = int(WORKER_BOT_ID)
-            await context.bot.send_message(chat_id=worker_bot_id, text=cmd)
+            group_id = int(COMMUNICATION_GROUP_ID)
+            await context.bot.send_message(chat_id=group_id, text=cmd)
         except Exception as e:
-            await update.message.reply_text(f"Error forwarding to Worker Bot: {e}")
+            await update.message.reply_text(f"Error forwarding to Group: {e}")
     else:
         # Default behavior for unknown text
         await update.message.reply_text("I didn't understand that. Use /start for menu.")
@@ -561,18 +561,18 @@ def main():
     )
     scheduler.start()
 
-    print("🤖 Attendance Bot V2 (Async + Bot-to-Bot) running...")
+    print("🤖 Attendance Bot V2 (Async + Group Communication) running...")
     
-    # Register Worker Bot Listener
-    if WORKER_BOT_ID:
+    # Register Communication Group Listener
+    if COMMUNICATION_GROUP_ID:
         try:
-            worker_id = int(WORKER_BOT_ID)
-            app.add_handler(MessageHandler(filters.Chat(chat_id=worker_id), listen_to_worker_bot))
-            print(f"✅ Listening to Worker Bot: {worker_id}")
+            group_id = int(COMMUNICATION_GROUP_ID)
+            app.add_handler(MessageHandler(filters.Chat(chat_id=group_id), listen_to_worker_bot))
+            print(f"✅ Listening to Communication Group: {group_id}")
         except ValueError:
-            print("⚠️ WORKER_BOT_ID must be an integer.")
+            print("⚠️ COMMUNICATION_GROUP_ID must be an integer.")
     else:
-        print("⚠️ WORKER_BOT_ID not set. Bot-to-bot communication will fail.")
+        print("⚠️ COMMUNICATION_GROUP_ID not set. Communication will fail.")
 
     app.run_polling()
 
